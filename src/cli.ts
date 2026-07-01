@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -35,6 +36,32 @@ type LookupResponse = {
   dataUpdatedAt: string | null;
   countText: string | null;
   results: NenkinResult[];
+};
+
+type BatchInputRow = {
+  rowNumber: number;
+  source: Record<string, string>;
+  name?: string;
+  kanaName?: string;
+  prefecture?: string;
+  address?: string;
+};
+
+type BatchOutputRow = {
+  rowNumber: number;
+  inputName: string;
+  inputKana: string;
+  inputPrefecture: string;
+  inputAddress: string;
+  status: "matched" | "no_results" | "multiple_results" | "error";
+  resultCount: number;
+  dataUpdatedAt: string;
+  officeName: string;
+  address: string;
+  corporateNumber: string;
+  officeStatus: string;
+  insuredCount: string;
+  error: string;
 };
 
 type ParsedPage = {
@@ -82,6 +109,7 @@ function exampleLines() {
     '  nenkin "トヨタ自動車" --pref 愛知県',
     '  nenkin --kana "トヨタ" --pref 愛知県',
     '  nenkin --corp 1180301018771',
+    '  nenkin batch companies.csv --out results.csv',
     '  nenkin lookup --name "トヨタ自動車" --prefecture "愛知県" --csv',
   ].join("\n");
 }
@@ -95,7 +123,7 @@ ${exampleLines()}`;
 
 function parseArgs(argv: string[]) {
   const [rawCommand, ...rawRest] = argv;
-  const knownCommands = new Set(["lookup", "help", "doctor"]);
+  const knownCommands = new Set(["lookup", "batch", "help", "doctor"]);
   const command =
     rawCommand == null
       ? undefined
@@ -168,7 +196,6 @@ function normalizeOptionKey(key: string) {
     corporate: "corporate-number",
     kana_name: "kana",
     pref: "prefecture",
-    out: "format",
   };
   return aliases[key] ?? key;
 }
@@ -256,6 +283,29 @@ function getOutputFormat(options: Map<string, string | boolean>): OutputFormat {
     return format;
   }
   throw new Error("--format must be table, json, or csv.");
+}
+
+function getBatchInputPath(options: Map<string, string | boolean>) {
+  const input = getString(options, "input") ?? getString(options, POSITIONAL_KEY);
+  if (!input) {
+    throw new Error(`Batch input CSV is required.
+
+Example:
+  nenkin batch companies.csv --out results.csv`);
+  }
+  return input;
+}
+
+function getDelayMs(options: Map<string, string | boolean>) {
+  const raw = getString(options, "delay-ms");
+  if (!raw) {
+    return 500;
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error("--delay-ms must be a non-negative number.");
+  }
+  return value;
 }
 
 async function selectSearchMode(page: Page, query: LookupQuery) {
@@ -681,8 +731,218 @@ function toCsv(response: LookupResponse) {
   return [header, ...rows].map((row) => row.map(csvEscape).join(",")).join("\n");
 }
 
+async function runBatch(options: Map<string, string | boolean>) {
+  const inputPath = getBatchInputPath(options);
+  const browserMode = getBrowserMode(options);
+  const format = getOutputFormat(options);
+  const outPath = getString(options, "out");
+  const delayMs = getDelayMs(options);
+  const includeClosed = getString(options, "include-closed");
+  const defaultIncludeClosed =
+    includeClosed === "closed" || includeClosed === "both" ? includeClosed : "active";
+  const content = await readFile(inputPath, "utf8");
+  const inputRows = parseBatchInput(content);
+  const outputRows: BatchOutputRow[] = [];
+
+  for (const [index, row] of inputRows.entries()) {
+    const label = row.name ?? row.kanaName ?? `row ${row.rowNumber}`;
+    process.stderr.write(`[${index + 1}/${inputRows.length}] ${label}\n`);
+
+    if (!row.prefecture) {
+      outputRows.push(toBatchErrorRow(row, "都道府県が空です。"));
+      continue;
+    }
+    if (!row.name && !row.kanaName) {
+      outputRows.push(toBatchErrorRow(row, "会社名またはカナが空です。"));
+      continue;
+    }
+
+    const query: LookupQuery = {
+      name: row.name,
+      kanaName: row.kanaName,
+      address: row.address,
+      prefecture: row.prefecture,
+      includeClosed: defaultIncludeClosed,
+    };
+
+    try {
+      const response = await lookup(query, browserMode, options);
+      outputRows.push(toBatchOutputRow(row, response));
+    } catch (error) {
+      outputRows.push(toBatchErrorRow(row, error instanceof Error ? error.message : String(error)));
+    }
+
+    if (delayMs > 0 && index < inputRows.length - 1) {
+      await sleep(delayMs);
+    }
+  }
+
+  const output =
+    format === "json"
+      ? JSON.stringify(outputRows, null, 2)
+      : toBatchCsv(outputRows);
+  if (outPath) {
+    await writeFile(outPath, `${output}\n`, "utf8");
+    process.stderr.write(`wrote: ${outPath}\n`);
+  } else {
+    console.log(output);
+  }
+}
+
+function parseBatchInput(content: string): BatchInputRow[] {
+  const rows = parseCsv(content);
+  if (rows.length === 0) {
+    return [];
+  }
+  const [header, ...body] = rows;
+  if (!header || header.length === 0) {
+    return [];
+  }
+  return body
+    .filter((cells) => cells.some((cell) => cell.trim() !== ""))
+    .map((cells, index) => {
+      const source = Object.fromEntries(header.map((name, columnIndex) => [name.trim(), cells[columnIndex]?.trim() ?? ""]));
+      return {
+        rowNumber: index + 2,
+        source,
+        name: pickColumn(source, ["name", "companyName", "company_name", "officeName", "会社名", "事業所名"]),
+        kanaName: pickColumn(source, ["kana", "kanaName", "kana_name", "officeKana", "カナ", "会社名カナ", "事業所名カナ"]),
+        prefecture: pickColumn(source, ["prefecture", "pref", "都道府県", "都道府県名"]),
+        address: pickColumn(source, ["address", "住所", "所在地"]),
+      };
+    });
+}
+
+function parseCsv(content: string) {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < content.length; i += 1) {
+    const char = content[i];
+    const next = content[i + 1];
+    if (inQuotes) {
+      if (char === '"' && next === '"') {
+        cell += '"';
+        i += 1;
+      } else if (char === '"') {
+        inQuotes = false;
+      } else {
+        cell += char;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inQuotes = true;
+    } else if (char === ",") {
+      row.push(cell);
+      cell = "";
+    } else if (char === "\n") {
+      row.push(cell.replace(/\r$/, ""));
+      rows.push(row);
+      row = [];
+      cell = "";
+    } else {
+      cell += char;
+    }
+  }
+
+  if (cell !== "" || row.length > 0) {
+    row.push(cell.replace(/\r$/, ""));
+    rows.push(row);
+  }
+  return rows;
+}
+
+function pickColumn(source: Record<string, string>, names: string[]) {
+  for (const name of names) {
+    const value = source[name]?.trim();
+    if (value) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function toBatchOutputRow(row: BatchInputRow, response: LookupResponse): BatchOutputRow {
+  const recommended = pickRecommended(response);
+  const candidate = recommended ?? response.results[0] ?? null;
+  const status =
+    response.results.length === 0
+      ? "no_results"
+      : response.results.length === 1 || recommended
+        ? "matched"
+        : "multiple_results";
+  return {
+    rowNumber: row.rowNumber,
+    inputName: row.name ?? "",
+    inputKana: row.kanaName ?? "",
+    inputPrefecture: row.prefecture ?? "",
+    inputAddress: row.address ?? "",
+    status,
+    resultCount: response.results.length,
+    dataUpdatedAt: response.dataUpdatedAt ?? "",
+    officeName: candidate?.officeName ?? "",
+    address: candidate?.address ?? "",
+    corporateNumber: candidate?.corporateNumber ?? "",
+    officeStatus: candidate?.status ?? "",
+    insuredCount: candidate?.insuredCount == null ? "" : String(candidate.insuredCount),
+    error: "",
+  };
+}
+
+function toBatchErrorRow(row: BatchInputRow, error: string): BatchOutputRow {
+  return {
+    rowNumber: row.rowNumber,
+    inputName: row.name ?? "",
+    inputKana: row.kanaName ?? "",
+    inputPrefecture: row.prefecture ?? "",
+    inputAddress: row.address ?? "",
+    status: "error",
+    resultCount: 0,
+    dataUpdatedAt: "",
+    officeName: "",
+    address: "",
+    corporateNumber: "",
+    officeStatus: "",
+    insuredCount: "",
+    error,
+  };
+}
+
+function toBatchCsv(rows: BatchOutputRow[]) {
+  const header: Array<keyof BatchOutputRow> = [
+    "rowNumber",
+    "inputName",
+    "inputKana",
+    "inputPrefecture",
+    "inputAddress",
+    "status",
+    "resultCount",
+    "dataUpdatedAt",
+    "officeName",
+    "address",
+    "corporateNumber",
+    "officeStatus",
+    "insuredCount",
+    "error",
+  ];
+  return [
+    header,
+    ...rows.map((row) => header.map((key) => String(row[key]))),
+  ]
+    .map((line) => line.map(csvEscape).join(","))
+    .join("\n");
+}
+
 function csvEscape(value: string) {
   return `"${value.replace(/"/g, '""')}"`;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function toTable(response: LookupResponse) {
@@ -871,6 +1131,7 @@ Usage:
   nenkin <事業所名> [--pref <都道府県>]
   nenkin --kana <事業所名カナ> [--pref <都道府県>]
   nenkin --corp <13桁>
+  nenkin batch <input.csv> [--out <output.csv>] [--json]
   nenkin doctor
   nenkin lookup --name <事業所名> [--prefecture <都道府県>] [--address <所在地>]
   nenkin lookup --kana <事業所名カナ> [--prefecture <都道府県>] [--address <所在地>]
@@ -883,6 +1144,8 @@ Options:
   --format table|json|csv                               Default: table
   --json                                                Same as --format json
   --csv                                                 Same as --format csv
+  --out <path>                                          Write batch output to a file
+  --delay-ms <number>                                   Batch delay between requests. Default: 500
 
 Examples:
 ${exampleLines()}
@@ -946,6 +1209,11 @@ ${commandHint()}`);
 
   if (command === "doctor") {
     await runDoctor();
+    return;
+  }
+
+  if (command === "batch") {
+    await runBatch(options);
     return;
   }
 

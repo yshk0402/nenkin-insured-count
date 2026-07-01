@@ -24,6 +24,7 @@ nenkin doctor
 nenkin --corp 1180301018771
 nenkin "トヨタ自動車" --pref 愛知県
 nenkin --kana トヨタジドウシャ --pref 愛知県
+nenkin batch companies.csv --out results.csv
 ```
 
 ローカル開発で試す場合:
@@ -37,6 +38,7 @@ npm run dev -- "トヨタ自動車" --pref 愛知県
 npm run dev -- --kana "トヨタ" --pref 愛知県
 npm run dev -- --corp "1180301018771"
 npm run dev -- "トヨタ自動車" --pref 愛知県 --csv
+npm run dev -- batch companies.csv --out results.csv
 ```
 
 ビルド後に `npm link` すると、短い `nenkin` コマンドで使えます。
@@ -59,6 +61,49 @@ NENKIN_SKIP_PY_DEPS=1 npm install
 ```bash
 npm run dev -- --corp "1180301018771" --json
 npm run dev -- --corp "1180301018771" --csv
+```
+
+## まとめて検索する
+
+会社名またはカナと、都道府県名を持つCSVを入力して、まとめて検索できます。
+
+```csv
+会社名,都道府県
+トヨタ自動車,愛知県
+ソニーグループ,東京都
+```
+
+```bash
+nenkin batch companies.csv --out results.csv
+```
+
+カナ検索の場合:
+
+```csv
+カナ,都道府県
+トヨタジドウシャ,愛知県
+ソニーグループ,東京都
+```
+
+対応している入力列名:
+
+- 会社名: `会社名`, `事業所名`, `name`, `companyName`, `company_name`, `officeName`
+- カナ: `カナ`, `会社名カナ`, `事業所名カナ`, `kana`, `kanaName`, `kana_name`, `officeKana`
+- 都道府県: `都道府県`, `都道府県名`, `prefecture`, `pref`
+- 住所/所在地: `住所`, `所在地`, `address`
+
+出力CSVには、入力値、検索ステータス、候補件数、推奨候補、法人番号、被保険者数、エラー内容が含まれます。
+
+JSONで出力したい場合:
+
+```bash
+nenkin batch companies.csv --json
+```
+
+検索間隔を調整したい場合:
+
+```bash
+nenkin batch companies.csv --out results.csv --delay-ms 1000
 ```
 
 明示的にHTTP-onlyを指定する場合:
