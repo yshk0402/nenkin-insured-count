@@ -5,6 +5,14 @@
   "private": false,
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yshk0402/nenkin-insured-count.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yshk0402/nenkin-insured-count/issues"
+  },
+  "homepage": "https://github.com/yshk0402/nenkin-insured-count#readme",
   "engines": {
     "node": ">=20"
   },

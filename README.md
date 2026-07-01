@@ -1,5 +1,7 @@
 # nenkin-insured-count
 
+[![npm version](https://img.shields.io/npm/v/nenkin-insured-count.svg)](https://www.npmjs.com/package/nenkin-insured-count)
+
 日本年金機構の「厚生年金保険・健康保険 適用事業所検索システム」を利用するための調査・取得CLIです。
 
 ## 方針
