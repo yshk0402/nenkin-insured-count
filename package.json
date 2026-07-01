@@ -1,0 +1,47 @@
+{
+  "name": "nenkin-insured-count",
+  "version": "0.1.1",
+  "description": "CLI for looking up Japan Pension Service office insured counts.",
+  "private": false,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "nenkin": "dist/cli.js",
+    "nenkin-insured-count": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "src/http_only.py",
+    "README.md",
+    "scripts/postinstall.cjs"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "chrome:cdp": "open -na \"Google Chrome\" --args --remote-debugging-port=9222 --user-data-dir=/tmp/nenkin-cdp-profile",
+    "dev": "tsx src/cli.ts",
+    "postinstall": "node scripts/postinstall.cjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm run build",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "nenkin",
+    "japan-pension-service",
+    "cli",
+    "insured-count"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "playwright": "^1.60.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3"
+  }
+}
