@@ -36,6 +36,9 @@ type LookupResponse = {
   dataUpdatedAt: string | null;
   countText: string | null;
   results: NenkinResult[];
+  sourceCountText?: string | null;
+  clientSideFiltered?: boolean;
+  partialResults?: boolean;
 };
 
 type BatchInputRow = {
@@ -434,9 +437,10 @@ async function lookup(
 
 function buildRemoteQuery(query: LookupQuery): LookupQuery {
   if (query.kanaName && query.address) {
+    const kanaAddress = toKanaAddressSearchTerm(query.address);
     return {
       ...query,
-      address: undefined,
+      address: kanaAddress,
     };
   }
   return query;
@@ -444,15 +448,25 @@ function buildRemoteQuery(query: LookupQuery): LookupQuery {
 
 function applyClientSideFilters(response: LookupResponse, originalQuery: LookupQuery): LookupResponse {
   const address = normalizeSearchText(originalQuery.address ?? "");
-  const results = address
-    ? response.results.filter((result) => normalizeSearchText(result.address).includes(address))
-    : response.results;
+  if (!address) {
+    return {
+      ...response,
+      query: originalQuery,
+    };
+  }
+
+  const results = response.results.filter((result) => normalizeSearchText(result.address).includes(address));
+  const sourceTotal = parseCountText(response.countText);
+  const partialResults = sourceTotal == null ? false : sourceTotal > response.results.length;
 
   return {
     ...response,
     query: originalQuery,
-    countText: address ? `${results.length}件が該当しました。` : response.countText,
+    sourceCountText: response.countText,
+    countText: `${results.length}件が該当しました。`,
     results,
+    clientSideFiltered: true,
+    partialResults,
   };
 }
 
@@ -1163,7 +1177,9 @@ function toBatchOutputRow(row: BatchInputRow, response: LookupResponse): BatchOu
   const status =
     response.results.length === 0
       ? "no_results"
-      : response.results.length === 1 || recommended
+      : isPartialClientSideFilter(response)
+        ? "multiple_results"
+        : response.results.length === 1 || recommended
         ? "matched"
         : "multiple_results";
   return {
@@ -1386,9 +1402,18 @@ function sleep(ms: number) {
 
 function toTable(response: LookupResponse) {
   const lines: string[] = [];
-  lines.push(`検索結果: ${response.countText ?? `${response.results.length}件`}`);
+  if (response.clientSideFiltered && response.sourceCountText) {
+    lines.push(`検索結果: ${response.sourceCountText}`);
+    lines.push(`住所フィルタ後: ${response.countText ?? `${response.results.length}件`}`);
+  } else {
+    lines.push(`検索結果: ${response.countText ?? `${response.results.length}件`}`);
+  }
   if (response.dataUpdatedAt) {
     lines.push(`データ更新日: ${response.dataUpdatedAt}`);
+  }
+  if (isPartialClientSideFilter(response)) {
+    lines.push("注意: 住所フィルタは表示中の候補に対して行っています。検索全体の唯一候補とは限りません。");
+    lines.push("CRM精緻化では `nenkin resolve` または `nenkin enrich` で法人番号を先に確定してください。");
   }
   lines.push("");
 
@@ -1452,6 +1477,10 @@ function pickRecommended(response: LookupResponse) {
     );
   }
 
+  if (isPartialClientSideFilter(response)) {
+    return null;
+  }
+
   if (response.results.length === 1) {
     return response.results[0] ?? null;
   }
@@ -1475,6 +1504,21 @@ function recommendReason(response: LookupResponse, result: NenkinResult) {
   return "名称が一致し、現存事業所でした。";
 }
 
+function isPartialClientSideFilter(response: LookupResponse) {
+  return response.clientSideFiltered === true && response.partialResults === true;
+}
+
+function parseCountText(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+  const match = value.match(/([0-9,]+)件/);
+  if (!match) {
+    return null;
+  }
+  return Number(match[1].replace(/,/g, ""));
+}
+
 function normalizeCompanyName(value: string) {
   return value
     .replace(/\s+/g, "")
@@ -1489,6 +1533,44 @@ function normalizeSearchText(value: string) {
     .replace(/　+/g, "")
     .replace(/[‐‑‒–—―ー－]/g, "-")
     .trim();
+}
+
+function toKanaAddressSearchTerm(value: string) {
+  const normalized = normalizeSearchText(value);
+  if (!normalized) {
+    return undefined;
+  }
+  if (/^[ァ-ヶー・･]+$/.test(normalized)) {
+    return normalized;
+  }
+
+  const municipalities: Array<[string, string]> = [
+    ["千代田区", "チヨダク"],
+    ["中央区", "チュウオウク"],
+    ["港区", "ミナトク"],
+    ["新宿区", "シンジュクク"],
+    ["文京区", "ブンキョウク"],
+    ["台東区", "タイトウク"],
+    ["墨田区", "スミダク"],
+    ["江東区", "コウトウク"],
+    ["品川区", "シナガワク"],
+    ["目黒区", "メグロク"],
+    ["大田区", "オオタク"],
+    ["世田谷区", "セタガヤク"],
+    ["渋谷区", "シブヤク"],
+    ["中野区", "ナカノク"],
+    ["杉並区", "スギナミク"],
+    ["豊島区", "トシマク"],
+    ["北区", "キタク"],
+    ["荒川区", "アラカワク"],
+    ["板橋区", "イタバシク"],
+    ["練馬区", "ネリマク"],
+    ["足立区", "アダチク"],
+    ["葛飾区", "カツシカク"],
+    ["江戸川区", "エドガワク"],
+  ];
+  const match = municipalities.find(([kanji]) => normalized.includes(kanji));
+  return match?.[1];
 }
 
 function compact(value: string, maxLength: number) {
