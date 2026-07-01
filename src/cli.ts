@@ -348,23 +348,45 @@ async function lookup(
   browserMode: BrowserMode,
   options: Map<string, string | boolean>,
 ): Promise<LookupResponse> {
+  const remoteQuery = buildRemoteQuery(query);
+  let response: LookupResponse;
   if (browserMode === "auto") {
-    return await lookupWithHttpOnly(query);
+    response = await lookupWithHttpOnly(remoteQuery);
+  } else if (browserMode === "cdp") {
+    response = await lookupWithCdp(remoteQuery, getString(options, "cdp-endpoint") ?? "http://127.0.0.1:9222");
+  } else if (browserMode === "http-only") {
+    response = await lookupWithHttpOnly(remoteQuery);
+  } else if (browserMode === "http-replay") {
+    response = await lookupWithHttpReplay(remoteQuery);
+  } else {
+    response = await lookupWithLaunchedChrome(remoteQuery, browserMode);
   }
 
-  if (browserMode === "cdp") {
-    return await lookupWithCdp(query, getString(options, "cdp-endpoint") ?? "http://127.0.0.1:9222");
-  }
+  return applyClientSideFilters(response, query);
+}
 
-  if (browserMode === "http-only") {
-    return await lookupWithHttpOnly(query);
+function buildRemoteQuery(query: LookupQuery): LookupQuery {
+  if (query.kanaName && query.address) {
+    return {
+      ...query,
+      address: undefined,
+    };
   }
+  return query;
+}
 
-  if (browserMode === "http-replay") {
-    return await lookupWithHttpReplay(query);
-  }
+function applyClientSideFilters(response: LookupResponse, originalQuery: LookupQuery): LookupResponse {
+  const address = normalizeSearchText(originalQuery.address ?? "");
+  const results = address
+    ? response.results.filter((result) => normalizeSearchText(result.address).includes(address))
+    : response.results;
 
-  return await lookupWithLaunchedChrome(query, browserMode);
+  return {
+    ...response,
+    query: originalQuery,
+    countText: address ? `${results.length}件が該当しました。` : response.countText,
+    results,
+  };
 }
 
 async function lookupWithHttpOnly(query: LookupQuery): Promise<LookupResponse> {
@@ -1041,6 +1063,14 @@ function normalizeCompanyName(value: string) {
     .replace(/\s+/g, "")
     .replace(/　+/g, "")
     .replace(/[（(]株[）)]/g, "株式会社")
+    .trim();
+}
+
+function normalizeSearchText(value: string) {
+  return value
+    .replace(/\s+/g, "")
+    .replace(/　+/g, "")
+    .replace(/[‐‑‒–—―ー－]/g, "-")
     .trim();
 }
 
