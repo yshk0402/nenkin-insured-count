@@ -173,7 +173,9 @@ function exampleLines() {
     '  nenkin --kana "トヨタ" --pref 愛知県',
     '  nenkin --corp 1180301018771',
     '  nenkin batch companies.csv --out results.csv',
+    '  nenkin resolve --kana フィールドエックス --pref 東京都 --address 神泉町',
     '  nenkin resolve companies.csv --out corporate-numbers.csv',
+    '  nenkin enrich --kana スペース --pref 東京都 --address 中野区新井',
     '  nenkin enrich companies.csv --out enriched.csv',
     '  nenkin lookup --name "トヨタ自動車" --prefecture "愛知県" --csv',
   ].join("\n");
@@ -877,13 +879,12 @@ async function runBatch(options: Map<string, string | boolean>) {
 }
 
 async function runResolve(options: Map<string, string | boolean>) {
-  const inputPath = getBatchInputPath(options);
   const format = getOutputFormat(options);
   const outPath = getString(options, "out");
   const delayMs = getDelayMs(options);
-  const content = await readFile(inputPath, "utf8");
-  const inputRows = parseBatchInput(content);
+  const inputRows = await getResolveInputRows(options);
   const outputRows: ResolveOutputRow[] = [];
+  const isSingle = inputRows.length === 1 && inputRows[0]?.rowNumber === 1;
 
   for (const [index, row] of inputRows.entries()) {
     const label = row.kanaName ?? row.name ?? `row ${row.rowNumber}`;
@@ -910,11 +911,10 @@ async function runResolve(options: Map<string, string | boolean>) {
     }
   }
 
-  await writeStructuredOutput(outputRows, format, outPath, toResolveCsv);
+  await writeStructuredOutput(outputRows, format, outPath, toResolveCsv, isSingle ? toResolveTable : undefined);
 }
 
 async function runEnrich(options: Map<string, string | boolean>) {
-  const inputPath = getBatchInputPath(options);
   const browserMode = getBrowserMode(options);
   const format = getOutputFormat(options);
   const outPath = getString(options, "out");
@@ -922,9 +922,9 @@ async function runEnrich(options: Map<string, string | boolean>) {
   const includeClosed = getString(options, "include-closed");
   const defaultIncludeClosed =
     includeClosed === "closed" || includeClosed === "both" ? includeClosed : "active";
-  const content = await readFile(inputPath, "utf8");
-  const inputRows = parseBatchInput(content);
+  const inputRows = await getResolveInputRows(options);
   const outputRows: EnrichOutputRow[] = [];
+  const isSingle = inputRows.length === 1 && inputRows[0]?.rowNumber === 1;
 
   for (const [index, row] of inputRows.entries()) {
     const label = row.kanaName ?? row.name ?? `row ${row.rowNumber}`;
@@ -979,7 +979,7 @@ async function runEnrich(options: Map<string, string | boolean>) {
     }
   }
 
-  await writeStructuredOutput(outputRows, format, outPath, toEnrichCsv);
+  await writeStructuredOutput(outputRows, format, outPath, toEnrichCsv, isSingle ? toEnrichTable : undefined);
 }
 
 async function resolveCorporateNumber(row: BatchInputRow): Promise<ResolveResponse> {
@@ -1011,14 +1011,73 @@ async function writeStructuredOutput<T>(
   format: OutputFormat,
   outPath: string | undefined,
   csvFormatter: (rows: T[]) => string,
+  tableFormatter?: (rows: T[]) => string,
 ) {
-  const output = format === "json" ? JSON.stringify(rows, null, 2) : csvFormatter(rows);
+  const output =
+    format === "json"
+      ? JSON.stringify(rows, null, 2)
+      : format === "table" && tableFormatter
+        ? tableFormatter(rows)
+        : csvFormatter(rows);
   if (outPath) {
     await writeFile(outPath, `${output}\n`, "utf8");
     process.stderr.write(`wrote: ${outPath}\n`);
   } else {
     console.log(output);
   }
+}
+
+async function getResolveInputRows(options: Map<string, string | boolean>) {
+  if (isInlineResolveInput(options)) {
+    return [buildInlineResolveRow(options)];
+  }
+
+  const inputPath = getBatchInputPath(options);
+  const content = await readFile(inputPath, "utf8");
+  return parseBatchInput(content);
+}
+
+function isInlineResolveInput(options: Map<string, string | boolean>) {
+  return (
+    options.has("name") ||
+    options.has("kana") ||
+    ((options.has("prefecture") || options.has("address")) && options.has(POSITIONAL_KEY))
+  );
+}
+
+function buildInlineResolveRow(options: Map<string, string | boolean>): BatchInputRow {
+  const positionalName = getString(options, POSITIONAL_KEY);
+  if (positionalName && (options.has("name") || options.has("kana"))) {
+    throw new Error(`Unexpected positional argument: ${positionalName}
+
+Use either a positional company name or explicit --name/--kana, not both.
+
+Examples:
+  nenkin resolve フィールドエックス --pref 東京都 --address 神泉町
+  nenkin resolve --kana フィールドエックス --pref 東京都 --address 神泉町`);
+  }
+
+  const name = getString(options, "name") ?? (options.has("kana") ? undefined : positionalName);
+  const kanaName = getString(options, "kana");
+  const prefecture = getString(options, "prefecture");
+  const address = getString(options, "address");
+
+  if (!name && !kanaName) {
+    throw new Error(`Either --name, --kana, or a positional company name is required.
+
+Examples:
+  nenkin resolve フィールドエックス --pref 東京都 --address 神泉町
+  nenkin enrich --kana スペース --pref 東京都 --address 中野区新井`);
+  }
+
+  return {
+    rowNumber: 1,
+    source: {},
+    name,
+    kanaName,
+    prefecture,
+    address,
+  };
 }
 
 function parseBatchInput(content: string): BatchInputRow[] {
@@ -1268,6 +1327,46 @@ function toEnrichCsv(rows: EnrichOutputRow[]) {
   return rowsToCsv(header, rows);
 }
 
+function toResolveTable(rows: ResolveOutputRow[]) {
+  const row = rows[0];
+  if (!row) {
+    return "No result.";
+  }
+  const lines = [
+    `resolve: ${row.status}`,
+    `入力: ${row.inputKana || row.inputName} ${row.inputPrefecture} ${row.inputAddress}`.trim(),
+  ];
+  if (row.error) {
+    lines.push(`error: ${row.error}`);
+    return lines.join("\n");
+  }
+  lines.push(`法人番号: ${row.corporateNumber || "-"}`);
+  lines.push(`商号: ${row.corporateName || "-"}`);
+  lines.push(`カナ: ${row.corporateKana || "-"}`);
+  lines.push(`所在地: ${row.corporateAddress || "-"}`);
+  lines.push(`confidence: ${row.confidence || "-"}`);
+  if (row.reason) {
+    lines.push(`理由: ${row.reason}`);
+  }
+  return lines.join("\n");
+}
+
+function toEnrichTable(rows: EnrichOutputRow[]) {
+  const row = rows[0];
+  if (!row) {
+    return "No result.";
+  }
+  const lines = [toResolveTable(rows)];
+  if (!row.error) {
+    lines.push(`データ更新日: ${row.dataUpdatedAt || "-"}`);
+    lines.push(`年金機構事業所名: ${row.officeName || "-"}`);
+    lines.push(`年金機構所在地: ${row.officeAddress || "-"}`);
+    lines.push(`状態: ${row.officeStatus || "-"}`);
+    lines.push(`被保険者数: ${row.insuredCount || "-"}`);
+  }
+  return lines.join("\n");
+}
+
 function rowsToCsv<T>(header: Array<keyof T>, rows: T[]) {
   return [
     header.map(String),
@@ -1433,7 +1532,9 @@ function commandGuide() {
   nenkin "トヨタ自動車" --pref 愛知県
   nenkin --corp 1180301018771
   nenkin --corp 1180301018771 --json
+  nenkin resolve --kana フィールドエックス --pref 東京都 --address 神泉町
   nenkin resolve companies.csv --out corporate-numbers.csv
+  nenkin enrich --kana スペース --pref 東京都 --address 中野区新井
   nenkin enrich companies.csv --out enriched.csv`;
 }
 
@@ -1483,7 +1584,11 @@ Usage:
   nenkin --corp <13桁>
   nenkin batch <input.csv> [--out <output.csv>] [--json]
   nenkin resolve <input.csv> [--out <output.csv>] [--json]
+  nenkin resolve --name <会社名> --pref <都道府県> [--address <住所>]
+  nenkin resolve --kana <会社名カナ> --pref <都道府県> [--address <住所>]
   nenkin enrich <input.csv> [--out <output.csv>] [--json]
+  nenkin enrich --name <会社名> --pref <都道府県> [--address <住所>]
+  nenkin enrich --kana <会社名カナ> --pref <都道府県> [--address <住所>]
   nenkin doctor
   nenkin lookup --name <事業所名> [--prefecture <都道府県>] [--address <所在地>]
   nenkin lookup --kana <事業所名カナ> [--prefecture <都道府県>] [--address <所在地>]

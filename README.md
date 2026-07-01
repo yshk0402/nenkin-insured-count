@@ -125,11 +125,19 @@ nenkin batch companies.csv --out results.csv --delay-ms 1000
 nenkin resolve companies.csv --out corporate-numbers.csv
 ```
 
+1社だけ確認したい場合は、CSVを作らずに直接指定できます。
+
+```bash
+nenkin resolve --kana フィールドエックス --pref 東京都 --address 神泉町
+nenkin resolve --kana スペース --pref 東京都 --address 中野区新井
+```
+
 出力CSVには、法人番号、商号、所在地、confidence、判定理由が含まれます。
 法人番号が確定した行について、そのまま年金機構側の被保険者数まで取得したい場合は `enrich` を使います。
 
 ```bash
 nenkin enrich companies.csv --out enriched.csv
+nenkin enrich --kana フィールドエックス --pref 東京都 --address 神泉町
 ```
 
 `enrich` は内部で `resolve` した法人番号を使って、既存の `nenkin --corp <13桁>` と同じ検索を実行します。
