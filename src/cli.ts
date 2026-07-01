@@ -64,6 +64,57 @@ type BatchOutputRow = {
   error: string;
 };
 
+type ResolveCandidate = {
+  corporateNumber: string;
+  name: string;
+  kana: string;
+  address: string;
+  confidence: number;
+  reasons: string[];
+};
+
+type ResolveResponse = {
+  query: {
+    name?: string;
+    kanaName?: string;
+    prefecture?: string;
+    address?: string;
+  };
+  searchedAt: string;
+  source: string;
+  status: "matched" | "needs_review" | "no_results";
+  countText: string | null;
+  narrowedBy: string[];
+  recommended: ResolveCandidate | null;
+  candidates: ResolveCandidate[];
+};
+
+type ResolveOutputRow = {
+  rowNumber: number;
+  inputName: string;
+  inputKana: string;
+  inputPrefecture: string;
+  inputAddress: string;
+  status: "matched" | "needs_review" | "no_results" | "error";
+  resultCount: number;
+  corporateNumber: string;
+  corporateName: string;
+  corporateKana: string;
+  corporateAddress: string;
+  confidence: string;
+  reason: string;
+  source: string;
+  error: string;
+};
+
+type EnrichOutputRow = ResolveOutputRow & {
+  dataUpdatedAt: string;
+  officeName: string;
+  officeAddress: string;
+  officeStatus: string;
+  insuredCount: string;
+};
+
 type ParsedPage = {
   dataUpdatedAt: string | null;
   countText: string | null;
@@ -97,6 +148,18 @@ function httpOnlyHelperPath() {
   return found;
 }
 
+function ntaResolveHelperPath() {
+  const candidates = [
+    join(CURRENT_DIR, "nta_resolve.py"),
+    join(CURRENT_DIR, "..", "src", "nta_resolve.py"),
+  ];
+  const found = candidates.find((candidate) => existsSync(candidate));
+  if (!found) {
+    throw new Error(`Could not find nta_resolve.py. Checked: ${candidates.join(", ")}`);
+  }
+  return found;
+}
+
 class BrowserBlockedError extends Error {
   constructor(message: string) {
     super(message);
@@ -110,6 +173,8 @@ function exampleLines() {
     '  nenkin --kana "トヨタ" --pref 愛知県',
     '  nenkin --corp 1180301018771',
     '  nenkin batch companies.csv --out results.csv',
+    '  nenkin resolve companies.csv --out corporate-numbers.csv',
+    '  nenkin enrich companies.csv --out enriched.csv',
     '  nenkin lookup --name "トヨタ自動車" --prefecture "愛知県" --csv',
   ].join("\n");
 }
@@ -123,7 +188,7 @@ ${exampleLines()}`;
 
 function parseArgs(argv: string[]) {
   const [rawCommand, ...rawRest] = argv;
-  const knownCommands = new Set(["lookup", "batch", "help", "doctor"]);
+  const knownCommands = new Set(["lookup", "batch", "resolve", "enrich", "help", "doctor"]);
   const command =
     rawCommand == null
       ? undefined
@@ -811,6 +876,151 @@ async function runBatch(options: Map<string, string | boolean>) {
   }
 }
 
+async function runResolve(options: Map<string, string | boolean>) {
+  const inputPath = getBatchInputPath(options);
+  const format = getOutputFormat(options);
+  const outPath = getString(options, "out");
+  const delayMs = getDelayMs(options);
+  const content = await readFile(inputPath, "utf8");
+  const inputRows = parseBatchInput(content);
+  const outputRows: ResolveOutputRow[] = [];
+
+  for (const [index, row] of inputRows.entries()) {
+    const label = row.kanaName ?? row.name ?? `row ${row.rowNumber}`;
+    process.stderr.write(`[${index + 1}/${inputRows.length}] resolve ${label}\n`);
+
+    if (!row.prefecture) {
+      outputRows.push(toResolveErrorRow(row, "都道府県が空です。"));
+      continue;
+    }
+    if (!row.name && !row.kanaName) {
+      outputRows.push(toResolveErrorRow(row, "会社名またはカナが空です。"));
+      continue;
+    }
+
+    try {
+      const response = await resolveCorporateNumber(row);
+      outputRows.push(toResolveOutputRow(row, response));
+    } catch (error) {
+      outputRows.push(toResolveErrorRow(row, error instanceof Error ? error.message : String(error)));
+    }
+
+    if (delayMs > 0 && index < inputRows.length - 1) {
+      await sleep(delayMs);
+    }
+  }
+
+  await writeStructuredOutput(outputRows, format, outPath, toResolveCsv);
+}
+
+async function runEnrich(options: Map<string, string | boolean>) {
+  const inputPath = getBatchInputPath(options);
+  const browserMode = getBrowserMode(options);
+  const format = getOutputFormat(options);
+  const outPath = getString(options, "out");
+  const delayMs = getDelayMs(options);
+  const includeClosed = getString(options, "include-closed");
+  const defaultIncludeClosed =
+    includeClosed === "closed" || includeClosed === "both" ? includeClosed : "active";
+  const content = await readFile(inputPath, "utf8");
+  const inputRows = parseBatchInput(content);
+  const outputRows: EnrichOutputRow[] = [];
+
+  for (const [index, row] of inputRows.entries()) {
+    const label = row.kanaName ?? row.name ?? `row ${row.rowNumber}`;
+    process.stderr.write(`[${index + 1}/${inputRows.length}] enrich ${label}\n`);
+
+    if (!row.prefecture) {
+      outputRows.push(toEnrichErrorRow(row, "都道府県が空です。"));
+      continue;
+    }
+    if (!row.name && !row.kanaName) {
+      outputRows.push(toEnrichErrorRow(row, "会社名またはカナが空です。"));
+      continue;
+    }
+
+    try {
+      const resolveResponse = await resolveCorporateNumber(row);
+      const resolveRow = toResolveOutputRow(row, resolveResponse);
+      if (resolveRow.status !== "matched" || !resolveRow.corporateNumber) {
+        outputRows.push({
+          ...resolveRow,
+          dataUpdatedAt: "",
+          officeName: "",
+          officeAddress: "",
+          officeStatus: "",
+          insuredCount: "",
+        });
+      } else {
+        const lookupResponse = await lookup(
+          {
+            corporateNumber: resolveRow.corporateNumber,
+            includeClosed: defaultIncludeClosed,
+          },
+          browserMode,
+          options,
+        );
+        const office = pickRecommended(lookupResponse) ?? lookupResponse.results[0] ?? null;
+        outputRows.push({
+          ...resolveRow,
+          dataUpdatedAt: lookupResponse.dataUpdatedAt ?? "",
+          officeName: office?.officeName ?? "",
+          officeAddress: office?.address ?? "",
+          officeStatus: office?.status ?? "",
+          insuredCount: office?.insuredCount == null ? "" : String(office.insuredCount),
+        });
+      }
+    } catch (error) {
+      outputRows.push(toEnrichErrorRow(row, error instanceof Error ? error.message : String(error)));
+    }
+
+    if (delayMs > 0 && index < inputRows.length - 1) {
+      await sleep(delayMs);
+    }
+  }
+
+  await writeStructuredOutput(outputRows, format, outPath, toEnrichCsv);
+}
+
+async function resolveCorporateNumber(row: BatchInputRow): Promise<ResolveResponse> {
+  const args = [ntaResolveHelperPath(), "--prefecture", row.prefecture ?? ""];
+  if (row.name) {
+    args.push("--name", row.name);
+  }
+  if (row.kanaName) {
+    args.push("--kana", row.kanaName);
+  }
+  if (row.address) {
+    args.push("--address", row.address);
+  }
+
+  try {
+    const { stdout } = await execFileAsync("python3", args, {
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    return JSON.parse(stdout) as ResolveResponse;
+  } catch (error) {
+    const stderr = typeof error === "object" && error != null && "stderr" in error ? String(error.stderr) : "";
+    const message = stderr.trim() || (error instanceof Error ? error.message : String(error));
+    throw new Error(`Corporate number resolve failed. ${message}`);
+  }
+}
+
+async function writeStructuredOutput<T>(
+  rows: T[],
+  format: OutputFormat,
+  outPath: string | undefined,
+  csvFormatter: (rows: T[]) => string,
+) {
+  const output = format === "json" ? JSON.stringify(rows, null, 2) : csvFormatter(rows);
+  if (outPath) {
+    await writeFile(outPath, `${output}\n`, "utf8");
+    process.stderr.write(`wrote: ${outPath}\n`);
+  } else {
+    console.log(output);
+  }
+}
+
 function parseBatchInput(content: string): BatchInputRow[] {
   const rows = parseCsv(content);
   if (rows.length === 0) {
@@ -934,6 +1144,58 @@ function toBatchErrorRow(row: BatchInputRow, error: string): BatchOutputRow {
   };
 }
 
+function toResolveOutputRow(row: BatchInputRow, response: ResolveResponse): ResolveOutputRow {
+  const candidate = response.recommended ?? response.candidates[0] ?? null;
+  return {
+    rowNumber: row.rowNumber,
+    inputName: row.name ?? "",
+    inputKana: row.kanaName ?? "",
+    inputPrefecture: row.prefecture ?? "",
+    inputAddress: row.address ?? "",
+    status: response.status,
+    resultCount: response.candidates.length,
+    corporateNumber: candidate?.corporateNumber ?? "",
+    corporateName: candidate?.name ?? "",
+    corporateKana: candidate?.kana ?? "",
+    corporateAddress: candidate?.address ?? "",
+    confidence: candidate == null ? "" : String(candidate.confidence),
+    reason: candidate?.reasons.join(" / ") ?? "",
+    source: response.source,
+    error: "",
+  };
+}
+
+function toResolveErrorRow(row: BatchInputRow, error: string): ResolveOutputRow {
+  return {
+    rowNumber: row.rowNumber,
+    inputName: row.name ?? "",
+    inputKana: row.kanaName ?? "",
+    inputPrefecture: row.prefecture ?? "",
+    inputAddress: row.address ?? "",
+    status: "error",
+    resultCount: 0,
+    corporateNumber: "",
+    corporateName: "",
+    corporateKana: "",
+    corporateAddress: "",
+    confidence: "",
+    reason: "",
+    source: "nta-web",
+    error,
+  };
+}
+
+function toEnrichErrorRow(row: BatchInputRow, error: string): EnrichOutputRow {
+  return {
+    ...toResolveErrorRow(row, error),
+    dataUpdatedAt: "",
+    officeName: "",
+    officeAddress: "",
+    officeStatus: "",
+    insuredCount: "",
+  };
+}
+
 function toBatchCsv(rows: BatchOutputRow[]) {
   const header: Array<keyof BatchOutputRow> = [
     "rowNumber",
@@ -953,6 +1215,62 @@ function toBatchCsv(rows: BatchOutputRow[]) {
   ];
   return [
     header,
+    ...rows.map((row) => header.map((key) => String(row[key]))),
+  ]
+    .map((line) => line.map(csvEscape).join(","))
+    .join("\n");
+}
+
+function toResolveCsv(rows: ResolveOutputRow[]) {
+  const header: Array<keyof ResolveOutputRow> = [
+    "rowNumber",
+    "inputName",
+    "inputKana",
+    "inputPrefecture",
+    "inputAddress",
+    "status",
+    "resultCount",
+    "corporateNumber",
+    "corporateName",
+    "corporateKana",
+    "corporateAddress",
+    "confidence",
+    "reason",
+    "source",
+    "error",
+  ];
+  return rowsToCsv(header, rows);
+}
+
+function toEnrichCsv(rows: EnrichOutputRow[]) {
+  const header: Array<keyof EnrichOutputRow> = [
+    "rowNumber",
+    "inputName",
+    "inputKana",
+    "inputPrefecture",
+    "inputAddress",
+    "status",
+    "resultCount",
+    "corporateNumber",
+    "corporateName",
+    "corporateKana",
+    "corporateAddress",
+    "confidence",
+    "reason",
+    "source",
+    "dataUpdatedAt",
+    "officeName",
+    "officeAddress",
+    "officeStatus",
+    "insuredCount",
+    "error",
+  ];
+  return rowsToCsv(header, rows);
+}
+
+function rowsToCsv<T>(header: Array<keyof T>, rows: T[]) {
+  return [
+    header.map(String),
     ...rows.map((row) => header.map((key) => String(row[key]))),
   ]
     .map((line) => line.map(csvEscape).join(","))
@@ -1114,7 +1432,9 @@ function commandGuide() {
   return `Quick commands:
   nenkin "トヨタ自動車" --pref 愛知県
   nenkin --corp 1180301018771
-  nenkin --corp 1180301018771 --json`;
+  nenkin --corp 1180301018771 --json
+  nenkin resolve companies.csv --out corporate-numbers.csv
+  nenkin enrich companies.csv --out enriched.csv`;
 }
 
 async function withSpinner<T>(message: string, enabled: boolean, task: () => Promise<T>) {
@@ -1162,6 +1482,8 @@ Usage:
   nenkin --kana <事業所名カナ> [--pref <都道府県>]
   nenkin --corp <13桁>
   nenkin batch <input.csv> [--out <output.csv>] [--json]
+  nenkin resolve <input.csv> [--out <output.csv>] [--json]
+  nenkin enrich <input.csv> [--out <output.csv>] [--json]
   nenkin doctor
   nenkin lookup --name <事業所名> [--prefecture <都道府県>] [--address <所在地>]
   nenkin lookup --kana <事業所名カナ> [--prefecture <都道府県>] [--address <所在地>]
@@ -1174,8 +1496,8 @@ Options:
   --format table|json|csv                               Default: table
   --json                                                Same as --format json
   --csv                                                 Same as --format csv
-  --out <path>                                          Write batch output to a file
-  --delay-ms <number>                                   Batch delay between requests. Default: 500
+  --out <path>                                          Write CSV/JSON output to a file
+  --delay-ms <number>                                   Delay between batch requests. Default: 500
 
 Examples:
 ${exampleLines()}
@@ -1244,6 +1566,16 @@ ${commandHint()}`);
 
   if (command === "batch") {
     await runBatch(options);
+    return;
+  }
+
+  if (command === "resolve") {
+    await runResolve(options);
+    return;
+  }
+
+  if (command === "enrich") {
+    await runEnrich(options);
     return;
   }
 

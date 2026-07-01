@@ -25,6 +25,8 @@ nenkin --corp 1180301018771
 nenkin "トヨタ自動車" --pref 愛知県
 nenkin --kana トヨタジドウシャ --pref 愛知県
 nenkin batch companies.csv --out results.csv
+nenkin resolve companies.csv --out corporate-numbers.csv
+nenkin enrich companies.csv --out enriched.csv
 ```
 
 ローカル開発で試す場合:
@@ -39,6 +41,8 @@ npm run dev -- --kana "トヨタ" --pref 愛知県
 npm run dev -- --corp "1180301018771"
 npm run dev -- "トヨタ自動車" --pref 愛知県 --csv
 npm run dev -- batch companies.csv --out results.csv
+npm run dev -- resolve companies.csv --out corporate-numbers.csv
+npm run dev -- enrich companies.csv --out enriched.csv
 ```
 
 ビルド後に `npm link` すると、短い `nenkin` コマンドで使えます。
@@ -105,6 +109,30 @@ nenkin batch companies.csv --json
 ```bash
 nenkin batch companies.csv --out results.csv --delay-ms 1000
 ```
+
+## 法人番号を解決してから取得する
+
+カナや短い会社名だけで年金機構側を検索すると、候補が多すぎて別法人を拾うことがあります。
+`resolve` は国税庁の法人番号公表サイトで会社名/カナ、都道府県、住所から法人番号候補を先に特定します。
+
+```csv
+カナ,都道府県,住所
+フィールドエックス,東京都,神泉町
+スペース,東京都,中野区新井
+```
+
+```bash
+nenkin resolve companies.csv --out corporate-numbers.csv
+```
+
+出力CSVには、法人番号、商号、所在地、confidence、判定理由が含まれます。
+法人番号が確定した行について、そのまま年金機構側の被保険者数まで取得したい場合は `enrich` を使います。
+
+```bash
+nenkin enrich companies.csv --out enriched.csv
+```
+
+`enrich` は内部で `resolve` した法人番号を使って、既存の `nenkin --corp <13桁>` と同じ検索を実行します。
 
 明示的にHTTP-onlyを指定する場合:
 

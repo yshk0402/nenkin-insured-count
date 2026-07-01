@@ -1,6 +1,6 @@
 {
   "name": "nenkin-insured-count",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "CLI for looking up Japan Pension Service office insured counts.",
   "private": false,
   "type": "module",
@@ -23,7 +23,9 @@
   "files": [
     "dist/",
     "src/http_only.py",
+    "src/nta_resolve.py",
     "README.md",
+    "scripts/e2e-searchability.cjs",
     "scripts/postinstall.cjs"
   ],
   "scripts": {
@@ -33,6 +35,7 @@
     "postinstall": "node scripts/postinstall.cjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm run typecheck && npm run build",
+    "test:e2e:search": "npm run build && node scripts/e2e-searchability.cjs",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
