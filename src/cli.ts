@@ -1221,6 +1221,12 @@ function toBatchErrorRow(row: BatchInputRow, error: string): BatchOutputRow {
 
 function toResolveOutputRow(row: BatchInputRow, response: ResolveResponse): ResolveOutputRow {
   const candidate = response.recommended ?? response.candidates[0] ?? null;
+  const reason =
+    candidate == null
+      ? ""
+      : response.status === "needs_review"
+        ? ["候補が複数あります。入力住所を町名以降まで指定してください。", ...candidate.reasons].join(" / ")
+        : candidate.reasons.join(" / ");
   return {
     rowNumber: row.rowNumber,
     inputName: row.name ?? "",
@@ -1234,7 +1240,7 @@ function toResolveOutputRow(row: BatchInputRow, response: ResolveResponse): Reso
     corporateKana: candidate?.kana ?? "",
     corporateAddress: candidate?.address ?? "",
     confidence: candidate == null ? "" : String(candidate.confidence),
-    reason: candidate?.reasons.join(" / ") ?? "",
+    reason,
     source: response.source,
     error: "",
   };
@@ -1356,10 +1362,11 @@ function toResolveTable(rows: ResolveOutputRow[]) {
     lines.push(`error: ${row.error}`);
     return lines.join("\n");
   }
-  lines.push(`法人番号: ${row.corporateNumber || "-"}`);
-  lines.push(`商号: ${row.corporateName || "-"}`);
-  lines.push(`カナ: ${row.corporateKana || "-"}`);
-  lines.push(`所在地: ${row.corporateAddress || "-"}`);
+  const candidateLabel = row.status === "matched" ? "" : "参考候補";
+  lines.push(`${candidateLabel}法人番号: ${row.corporateNumber || "-"}`);
+  lines.push(`${candidateLabel}商号: ${row.corporateName || "-"}`);
+  lines.push(`${candidateLabel}カナ: ${row.corporateKana || "-"}`);
+  lines.push(`${candidateLabel}所在地: ${row.corporateAddress || "-"}`);
   lines.push(`confidence: ${row.confidence || "-"}`);
   if (row.reason) {
     lines.push(`理由: ${row.reason}`);

@@ -1,6 +1,6 @@
 {
   "name": "nenkin-insured-count",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "CLI for looking up Japan Pension Service office insured counts.",
   "private": false,
   "type": "module",

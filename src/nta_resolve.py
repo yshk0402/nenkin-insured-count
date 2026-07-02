@@ -286,8 +286,6 @@ def resolve(args):
     if top:
         if top["confidence"] >= 0.85 and (second is None or top["confidence"] - second["confidence"] >= 0.1):
             status = "matched"
-        elif top["confidence"] >= 0.75 and args.address and normalize_search(args.address) in normalize_search(top["address"]):
-            status = "matched"
         else:
             status = "needs_review"
 

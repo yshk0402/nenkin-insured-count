@@ -54,6 +54,15 @@ const ambiguousLookup = execFileSync(
     stdio: ["ignore", "pipe", "inherit"],
   },
 );
+const ambiguousEnrich = execFileSync(
+  process.execPath,
+  ["dist/cli.js", "enrich", "--kana", "スペース", "--pref", "東京都", "--address", "中野区"],
+  {
+    cwd: join(__dirname, ".."),
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "inherit"],
+  },
+);
 const expectations = [
   ["Field X corporate number", "3011001176197"],
   ["Field X insured count", '"2",""'],
@@ -85,6 +94,16 @@ if (!ambiguousLookup.includes("住所フィルタ後: 19件")) {
 if (ambiguousLookup.includes("推奨候補") || ambiguousLookup.includes("候補が1件のみ")) {
   console.error(ambiguousLookup);
   throw new Error("Ambiguous lookup was incorrectly recommended as a single candidate");
+}
+
+if (!ambiguousEnrich.includes("resolve: needs_review")) {
+  console.error(ambiguousEnrich);
+  throw new Error("Ambiguous enrich should require review");
+}
+
+if (ambiguousEnrich.includes("被保険者数: 1") || ambiguousEnrich.includes("被保険者数: 45")) {
+  console.error(ambiguousEnrich);
+  throw new Error("Ambiguous enrich should not fetch insured count");
 }
 
 console.log(`ok: searchability E2E passed (${outputPath})`);
